@@ -1,24 +1,46 @@
 from dolfin import *
 from dolfin_adjoint import *
+from ufl import And, conditional
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from parameters import *
-from PDE_setup import inlet_concentrations, C_CO_inlet, C_O2_inlet, T_inlet, W, bcs, ds, OUTLET_ID
+from PDE_setup import inlet_concentrations, C_CO_inlet, C_O2_inlet, T_inlet, W, bcs, ds, OUTLET_ID, mesh
 
 set_log_level(LogLevel.ERROR)
-a_const = Constant(3e4)
+
+N_ZONES = 10
+a_const_list = [Constant(3e4) for _ in range(N_ZONES)]
+z = SpatialCoordinate(mesh)[0]
+z_edges = np.linspace(0.0, L, N_ZONES + 1)
+zone_indicators = []
+for k in range(N_ZONES):
+    zL, zR = z_edges[k], z_edges[k+1]
+ 
+    inside = And(z >= zL, z < zR)
+    chi_k = conditional( inside, 1.0, 0.0 )
+
+    zone_indicators.append(chi_k)
+
+def a_s_expression(a_consts):
+    """
+    Build UFL expression a_s(z) = sum_k a_const_list[k] * chi_k(z)
+    where chi_k are the precomputed zone indicators.
+    """
+    a_s = 0
+    for a_c, chi_k in zip(a_consts, zone_indicators):
+        a_s += a_c * chi_k
+    return a_s
 
 N_alpha = 50
 alpha_range = np.arange(N_alpha) / N_alpha
 
-def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_val, alpha=1.0, U_init=None):
+def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_vals, alpha=1.0, U_init=None):
     """
     Solve the steady-state reactor PDE for given inlet CO mole fraction,
-    inlet temperature, superficial velocity u_g, and a constant
-    a_s(z) profile defined by a_val.
-    
+    inlet temperature, superficial velocity u_g, and a piecewise-constant
+    a_s(z) profile defined by a_vals (len = N_ZONES).
     Returns (z_coords, C_CO(z), C_O2(z), T(z), U).
     """
     # Update inlet boundary values
@@ -28,7 +50,13 @@ def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_val, alpha=1.0, U_init=None
     T_inlet.assign(T_in)
 
     # Build a_s(z) field from a_vals
-    a_const.assign(a_val)
+    # a_const_list is assumed to be a list of dolfin.Constant, one per zone
+    assert len(a_const_list) == len(a_vals), \
+        "len(a_const_list) must match len(a_vals)"
+
+    for a_c, val in zip(a_const_list, a_vals):
+        a_c.assign(float(val))   # ensure plain float, in case val is np scalar
+    a_s = a_s_expression(a_const_list)
 
     # Fresh unknown & test functions
     U = Function(W)
@@ -45,15 +73,15 @@ def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_val, alpha=1.0, U_init=None
     # Residual with a_s_field instead of scalar a_s
     F_co = ( D_ax * dot(grad(Cco), grad(v1))
              + u_g * Cco.dx(0) * v1
-             + alpha * a_const * r_local * v1 ) * dx
+             + alpha * a_s * r_local * v1 ) * dx
 
     F_o2 = ( D_ax * dot(grad(Co2), grad(v2))
              + u_g * Co2.dx(0) * v2
-             + 0.5 * alpha * a_const * r_local * v2 ) * dx
+             + 0.5 * alpha * a_s * r_local * v2 ) * dx
 
     F_T = ( lambda_eff * dot(grad(T), grad(v3))
             + rho_g * cp_g * u_g * T.dx(0) * v3
-            - q * alpha * a_const * r_local * v3
+            - q * alpha * a_s * r_local * v3
             + h_w * P_over_A * (T - T_wall) * v3 ) * dx
 
     F = F_co + F_o2 + F_T
@@ -79,13 +107,13 @@ def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_val, alpha=1.0, U_init=None
 
     return U
 
-def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=False):
+def forward_objective_and_gradient(a_vals, y_CO_in, T_in, u_g, U_init, verbose=False):
     get_working_tape().clear_tape()
 
     # Aolve at alpha=1.0 WITH annotation
     U = solve_reactor_with_profile(
         y_CO_in, T_in, u_g,
-        a_val=a_vec, alpha=1.0, U_init=U_init)
+        a_vals=a_vals, alpha=1.0, U_init=U_init)
     Cco_fun, Co2_fun, T_fun = U.split()
 
     # Main Objective: Reduction CO Concentration.
@@ -104,7 +132,7 @@ def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=Fa
     J = assemble(J_form)
 
     # Reduced functional + gradient wrt a_const
-    m = Control(a_const)
+    m = [Control(a_c) for a_c in a_const_list]
     J_reduced = ReducedFunctional(J, m)
     grad_list = J_reduced.derivative()
     grad_J = np.array(grad_list, dtype=float)
@@ -118,25 +146,23 @@ def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=Fa
             print('max T, conversion, penalty =', T_max, CR, excess_penalty)
     return float(J), grad_J, T_max, CR, excess_penalty, U
 
-def gradient_descent(a0, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=1e-6, verbose=True):
-    a = a0
+def gradient_descent(a0_vals, y_CO_in, T_in, u_g, max_iters=10000, step_size=1.0, tol=1e-6, verbose=True):
+    a_vals = a0_vals
 
     # Find a decent initial condition through alpha-continuation
-    print(f'\n\nComputing an initial point near a = {a} ...')
+    print(f'\n\nComputing an initial point near a = {a_vals} ...')
     U_init = None
     with stop_annotating():
         for alpha in alpha_range:
-            U_init = solve_reactor_with_profile(
-                y_CO_in, T_in, u_g,
-                a_val=a,
+            U_init = solve_reactor_with_profile( y_CO_in, T_in, u_g, a_vals=a_vals,
                 alpha=alpha,
                 U_init=U_init,
             )
     print('... Done')
 
     print('\n\nStarting Optimization ..')
-    J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, U_init)
-    a_history = [a]
+    J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a_vals, y_CO_in, T_in, u_g, U_init)
+    a_history = [a_vals]
     J_history = [J]
     grad_history = [np.linalg.norm(grad)]
     conversion_rates = [CR]
@@ -144,26 +170,28 @@ def gradient_descent(a0, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=
     penalties = [penalty]
     for k in range(max_iters):
         # take gradient step
-        a -= step_size * grad * a
-        a = np.maximum(a, 0.0)
+        a_vals -= step_size * grad * a_vals 
+        a_vals = np.maximum(a_vals, 0.0)
 
         U_init = U.copy(deepcopy=True)
-        J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, U_init)
+        J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a_vals, y_CO_in, T_in, u_g, U_init)
         if verbose and k % 10 == 0:
-            print(f"Iteration {k}: a = {a:2e}. Conversion: {CR:2e}, Tmax:  {T_max:2e}.  J = {J:.8e},  |grad| = {np.linalg.norm(a * grad):.2e}")
+            formatted_avals = " ".join(f"{v: .2e}" for v in a_vals)
+            print(f"Iteration {k}: a = {formatted_avals}. Conversion: {CR:2e}, Tmax:  {T_max:2e}.  J = {J:.8e},  |grad| = {np.linalg.norm(a_vals * grad):.2e}")
 
-        if np.abs(a * grad) < tol:
-            print(f'Optimization Finished at a = {a} with |grad| = {np.linalg.norm(a * grad):.2e}')
+        if np.linalg.norm(a_vals * grad) < tol:
+            formatted_avals = " ".join(f"{v: .2e}" for v in a_vals)
+            print(f'Optimization Finished at a = {formatted_avals} with |grad| = {np.linalg.norm(a_vals * grad):.2e}')
             break
 
-        a_history.append(a)
+        a_history.append(a_vals)
         J_history.append(J)
         grad_history.append(np.linalg.norm(grad))
         conversion_rates.append(CR)
         T_max_values.append(T_max)
         penalties.append(penalty)
 
-    return a, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties
+    return a_vals, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties
 
 if __name__ == '__main__':
     y_CO_in = 0.034
@@ -171,8 +199,8 @@ if __name__ == '__main__':
     u_g = 0.25
 
     lr = 1.0
-    a_val = 3e4
-    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties = gradient_descent(a_val, y_CO_in, T_in, u_g, step_size=lr, verbose=True)
+    a_vals = 3e4 * np.ones(N_ZONES)
+    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties = gradient_descent(a_vals, y_CO_in, T_in, u_g, step_size=lr, verbose=True)
 
     # Plot the J-values and grad norms
     iters = np.arange(len(J_history))
