@@ -11,7 +11,6 @@ from PDE_setup import inlet_concentrations, C_CO_inlet, C_O2_inlet, T_inlet, W, 
 set_log_level(LogLevel.ERROR)
 
 N_ZONES = 10
-a_const_list = [Constant(3e4) for _ in range(N_ZONES)]
 z = SpatialCoordinate(mesh)[0]
 z_edges = np.linspace(0.0, L, N_ZONES + 1)
 zone_indicators = []
@@ -33,10 +32,7 @@ def a_s_expression(a_consts):
         a_s += a_c * chi_k
     return a_s
 
-N_alpha = 50
-alpha_range = np.arange(N_alpha) / N_alpha
-
-def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_vals, alpha=1.0, U_init=None):
+def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_const_list, alpha=1.0, U_init=None):
     """
     Solve the steady-state reactor PDE for given inlet CO mole fraction,
     inlet temperature, superficial velocity u_g, and a piecewise-constant
@@ -48,14 +44,6 @@ def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_vals, alpha=1.0, U_init=Non
     C_CO_inlet.assign(Cco_in)
     C_O2_inlet.assign(Co2_in)
     T_inlet.assign(T_in)
-
-    # Build a_s(z) field from a_vals
-    # a_const_list is assumed to be a list of dolfin.Constant, one per zone
-    assert len(a_const_list) == len(a_vals), \
-        "len(a_const_list) must match len(a_vals)"
-
-    for a_c, val in zip(a_const_list, a_vals):
-        a_c.assign(float(val))   # ensure plain float, in case val is np scalar
     a_s = a_s_expression(a_const_list)
 
     # Fresh unknown & test functions
@@ -111,9 +99,13 @@ def forward_objective_and_gradient(a_vals, y_CO_in, T_in, u_g, U_init, verbose=F
     get_working_tape().clear_tape()
 
     # Aolve at alpha=1.0 WITH annotation
+    a_const_list = [Constant(3e4) for _ in range(N_ZONES)]
+    for a_c, val in zip(a_const_list, a_vals):
+        a_c.assign(float(val))   # ensure plain float, in case val is np scalar
+
     U = solve_reactor_with_profile(
         y_CO_in, T_in, u_g,
-        a_vals=a_vals, alpha=1.0, U_init=U_init)
+        a_const_list, alpha=1.0, U_init=U_init)
     Cco_fun, Co2_fun, T_fun = U.split()
 
     # Main Objective: Reduction CO Concentration.
@@ -146,18 +138,27 @@ def forward_objective_and_gradient(a_vals, y_CO_in, T_in, u_g, U_init, verbose=F
             print('max T, conversion, penalty =', T_max, CR, excess_penalty)
     return float(J), grad_J, T_max, CR, excess_penalty, U
 
+def computeInitialSolution(a_vals, y_CO_in, T_in, u_g):
+    a_const_list = [Constant(3e4) for _ in range(N_ZONES)]
+    for a_c, val in zip(a_const_list, a_vals):
+        a_c.assign(float(val))   # ensure plain float, in case val is np scalar
+
+    U_init = None
+    N_alpha = 50
+    alpha_range = np.arange(N_alpha) / N_alpha
+    with stop_annotating():
+        for alpha in alpha_range:
+            U_init = solve_reactor_with_profile( y_CO_in, T_in, u_g, a_const_list,
+                alpha=alpha, U_init=U_init)
+
+    return U_init
+
 def gradient_descent(a0_vals, y_CO_in, T_in, u_g, max_iters=10000, step_size=1.0, tol=1e-6, verbose=True):
     a_vals = a0_vals
 
     # Find a decent initial condition through alpha-continuation
     print(f'\n\nComputing an initial point near a = {a_vals} ...')
-    U_init = None
-    with stop_annotating():
-        for alpha in alpha_range:
-            U_init = solve_reactor_with_profile( y_CO_in, T_in, u_g, a_vals=a_vals,
-                alpha=alpha,
-                U_init=U_init,
-            )
+    U_init = computeInitialSolution(a_vals, y_CO_in, T_in, u_g)
     print('... Done')
 
     print('\n\nStarting Optimization ..')
