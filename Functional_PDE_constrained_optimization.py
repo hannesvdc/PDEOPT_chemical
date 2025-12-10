@@ -153,7 +153,7 @@ def computeInitialSolution(a_vals, y_CO_in, T_in, u_g):
 
     return U_init
 
-def gradient_descent(a0_vals, y_CO_in, T_in, u_g, max_iters=10000, step_size=1.0, tol=1e-6, verbose=True):
+def gradient_descent(a0_vals, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=1e-6, verbose=True):
     a_vals = a0_vals
 
     # Find a decent initial condition through alpha-continuation
@@ -192,7 +192,7 @@ def gradient_descent(a0_vals, y_CO_in, T_in, u_g, max_iters=10000, step_size=1.0
         T_max_values.append(T_max)
         penalties.append(penalty)
 
-    return a_vals, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties
+    return a_vals, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties, U
 
 if __name__ == '__main__':
     y_CO_in = 0.034
@@ -201,7 +201,20 @@ if __name__ == '__main__':
 
     lr = 1.0
     a_vals = 3e4 * np.ones(N_ZONES)
-    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties = gradient_descent(a_vals, y_CO_in, T_in, u_g, step_size=lr, verbose=True)
+    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties, U_final = gradient_descent(a_vals, y_CO_in, T_in, u_g, step_size=lr, verbose=True)
+    
+    CO_final, O2_final, T_final = U_final.split(deepcopy=True)
+    V = CO_final.function_space()
+    x = V.tabulate_dof_coordinates().reshape(-1)
+
+    # Values
+    Cco_vals = CO_final.vector().get_local()
+    Co2_vals = O2_final.vector().get_local()
+    T_vals = T_final.vector().get_local()
+    sort_idx   = np.argsort(x)
+    x_sorted   = x[sort_idx]
+    Cco_sorted = Cco_vals[sort_idx]
+    T_sorted   = T_vals[sort_idx]
 
     # Plot the J-values and grad norms
     iters = np.arange(len(J_history))
@@ -217,28 +230,51 @@ if __name__ == '__main__':
     plt.xlabel('Iteration')
     plt.legend()
 
-    fig, ax1 = plt.subplots()
-    color1 = "tab:blue"
-    color2 = "tab:red"
+    # fig, ax1 = plt.subplots()
+    # color1 = "tab:blue"
+    # color2 = "tab:red"
 
-    # Left y-axis: conversion
-    ax1.set_xlabel(r"$a$")
-    ax1.set_ylabel("CO conversion", color=color1)
-    l1 = ax1.plot(a_history, conversion_rates, color=color1, label=r"Conversion Rate $(\%)$")
-    ax1.tick_params(axis="y", labelcolor=color1)
+    # # Left y-axis: conversion
+    # ax1.set_xlabel(r"$a$")
+    # ax1.set_ylabel("CO conversion", color=color1)
+    # l1 = ax1.plot(a_history, conversion_rates, color=color1, label=r"Conversion Rate $(\%)$")
+    # ax1.tick_params(axis="y", labelcolor=color1)
 
-    # Right y-axis: max temperature
-    ax2 = ax1.twinx()
-    ax2.set_ylabel(r"$T_{\max}$ [K]", color=color2)
-    l2 = ax2.plot(a_history, T_max_values, color=color2, label=r"$T_{\max}$")
-    ax2.tick_params(axis="y", labelcolor=color2)
+    # # Right y-axis: max temperature
+    # ax2 = ax1.twinx()
+    # ax2.set_ylabel(r"$T_{\max}$ [K]", color=color2)
+    # l2 = ax2.plot(a_history, T_max_values, color=color2, label=r"$T_{\max}$")
+    # ax2.tick_params(axis="y", labelcolor=color2)
 
-    # Combined legend
-    lines = l1 + l2
-    labels = [line.get_label() for line in lines]
-    ax1.legend(lines, labels)
-    ax1.set_title(r"CO Conversion and hot-spot vs $a$")
-    fig.tight_layout()
-    plt.grid(True, axis="x", linestyle="--", alpha=0.5)
+    # # Combined legend
+    # lines = l1 + l2
+    # labels = [line.get_label() for line in lines]
+    # ax1.legend(lines, labels)
+    # ax1.set_title(r"CO Conversion and hot-spot vs $a$")
+    # fig.tight_layout()
+    # plt.grid(True, axis="x", linestyle="--", alpha=0.5)
+
+    # Finally also plot the CO and T solution profiles with a(z)
+    fig3, axes = plt.subplots(3, 1, figsize=(6, 8), sharex=True)
+    axes[0].plot(x_sorted, Cco_sorted)
+    axes[0].set_ylabel(r"$C_{\mathrm{CO}}(z)$")
+    axes[1].plot(x_sorted, T_sorted)
+    axes[1].set_ylabel(r"$T(z)$ [K]")
+
+    x_min, x_max = x_sorted[0], x_sorted[-1]
+    zone_edges = np.linspace(x_min, x_max, N_ZONES + 1)
+    z_step = []
+    a_step = []
+    for i in range(N_ZONES):
+        z_step.extend([zone_edges[i], zone_edges[i+1]])
+        a_step.extend([a_opt[i], a_opt[i]])
+
+    axes[2].plot(z_step, a_step, drawstyle="steps-post")
+    axes[2].set_ylabel(r"$a(z)$")
+    axes[2].set_xlabel(r"$z$")
+    axes[2].grid(True, linestyle="--", alpha=0.5)
+
+    fig3.tight_layout()
+    plt.savefig('./images/multi_zones.png', transparent=True)
 
     plt.show()

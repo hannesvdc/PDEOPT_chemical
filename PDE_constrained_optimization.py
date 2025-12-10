@@ -79,7 +79,7 @@ def solve_reactor_with_profile(y_CO_in, T_in, u_g, a_val, alpha=1.0, U_init=None
 
     return U
 
-def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=False):
+def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, gamma, U_init, verbose=False):
     get_working_tape().clear_tape()
 
     # Aolve at alpha=1.0 WITH annotation
@@ -94,10 +94,10 @@ def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=Fa
     J_conv_form = (1.0 / C_in_val) * Cco_fun * ds(OUTLET_ID)
 
     # Penalty: excess temperature over inlet
-    gamma = Constant(1e1)
+    gamma_c = Constant(gamma)
     excess = T_fun - T_in
     smooth_relu = 0.5 * (excess + sqrt(excess**2 + 1.e-4))  # ~ max(dT, 0)
-    excess_penalty_form = gamma * smooth_relu**2 * dx
+    excess_penalty_form = gamma_c * smooth_relu**2 * dx
 
     # Assemble the total objective
     J_form = 100.0 * J_conv_form + excess_penalty_form
@@ -118,7 +118,7 @@ def forward_objective_and_gradient(a_vec, y_CO_in, T_in, u_g, U_init, verbose=Fa
             print('max T, conversion, penalty =', T_max, CR, excess_penalty)
     return float(J), grad_J, T_max, CR, excess_penalty, U
 
-def gradient_descent(a0, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=1e-6, verbose=True):
+def gradient_descent(a0, y_CO_in, T_in, u_g, gamma, max_iters=1000, step_size=1.0, tol=1e-6, verbose=True):
     a = a0
 
     # Find a decent initial condition through alpha-continuation
@@ -135,7 +135,7 @@ def gradient_descent(a0, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=
     print('... Done')
 
     print('\n\nStarting Optimization ..')
-    J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, U_init)
+    J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, gamma, U_init)
     a_history = [a]
     J_history = [J]
     grad_history = [np.linalg.norm(grad)]
@@ -148,7 +148,7 @@ def gradient_descent(a0, y_CO_in, T_in, u_g, max_iters=1000, step_size=1.0, tol=
         a = np.maximum(a, 0.0)
 
         U_init = U.copy(deepcopy=True)
-        J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, U_init)
+        J, grad, T_max, CR, penalty, U = forward_objective_and_gradient(a, y_CO_in, T_in, u_g, gamma, U_init)
         if verbose and k % 10 == 0:
             print(f"Iteration {k}: a = {a:2e}. Conversion: {CR:2e}, Tmax:  {T_max:2e}.  J = {J:.8e},  |grad| = {np.linalg.norm(a * grad):.2e}")
 
@@ -171,8 +171,10 @@ if __name__ == '__main__':
     u_g = 0.25
 
     lr = 1.0
+    gamma = 10000.0
     a_val = 3e4
-    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties = gradient_descent(a_val, y_CO_in, T_in, u_g, step_size=lr, verbose=True)
+    a_opt, a_history, J_history, grad_history, conversion_rates, T_max_values, penalties = gradient_descent(a_val, y_CO_in, T_in, u_g, gamma, step_size=lr, verbose=True)
+    np.save(f'./data/gamma={gamma}.npy', np.array([a_opt, conversion_rates[-1], T_max_values[-1]]))
 
     # Plot the J-values and grad norms
     iters = np.arange(len(J_history))

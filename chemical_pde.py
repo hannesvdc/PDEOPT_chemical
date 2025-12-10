@@ -108,7 +108,7 @@ def computeSteadyState(y_CO_in, T_in, u_g, verbose=True):
     return z, Cco_z, Co2_z, T_z, U_prev
 
 if __name__ == "__main__":
-    # Example: 5% CO, 730 K inlet, moderate velocity
+    # Example: 3.4% CO, 750K - 800K inlet, moderate velocity
     y_CO_in = 0.034
     T_in_1 = 750.0 
     T_in_2 = 800.0 
